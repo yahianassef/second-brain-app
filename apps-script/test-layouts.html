@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>Code.gs — real sheet layout</title>
+<body style="font:13px/1.6 monospace;background:#0B0F16;color:#E6EAF2;padding:16px">
+<pre id="out">running…</pre>
+<script>
+/* Mock of the Sheets API shaped like the real workbook: amounts are formatted
+   NUMBERS (so only the display text reveals the currency) and most headers are blank. */
+function ensure(sh, r, c) {
+  while (sh._g.length < r) sh._g.push([]);
+  const row = sh._g[r - 1];
+  while (row.length < c) row.push('');
+  return row;
+}
+function display(sh, v, col) {
+  if (v === '' || v === null || v === undefined) return '';
+  if (v instanceof Date) return v.toDateString();
+  if (typeof v === 'number' && sh._money && sh._money.indexOf(col) !== -1) {
+    return (sh._cur || 'AED') + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  return String(v);
+}
+function makeRange(sh, r, c, nr, nc) {
+  return {
+    getValues() {
+      const out = [];
+      for (let i = 0; i < nr; i++) {
+        const row = [];
+        for (let j = 0; j < nc; j++) { const rr = sh._g[r - 1 + i] || []; row.push(rr[c - 1 + j] ?? ''); }
+        out.push(row);
+      }
+      return out;
+    },
+    getDisplayValues() {
+      return this.getValues().map((row, i) => row.map((v, j) => display(sh, v, c - 1 + j)));
+    },
+    setValue(v) { ensure(sh, r, c)[c - 1] = v; return this; },
+    setValues(vals) { vals.forEach((rv, i) => rv.forEach((v, j) => { ensure(sh, r + i, c + j)[c + j - 1] = v; })); return this; },
+    clearContent() { for (let i = 0; i < nr; i++) for (let j = 0; j < nc; j++) { const rr = sh._g[r - 1 + i]; if (rr) rr[c - 1 + j] = ''; } return this; }
+  };
+}
+function makeSheet(name, grid, opts = {}) {
+  const sh = {
+    _name: name, _g: grid.map(r => r.slice()), _cur: opts.cur || 'AED', _money: opts.money || [1],
+    getName: () => sh._name,
+    setName: n => { sh._name = n; return sh; },
+    getDataRange: () => makeRange(sh, 1, 1, Math.max(sh._g.length, 1), Math.max(1, ...sh._g.map(r => r.length))),
+    getRange: (r, c, nr = 1, nc = 1) => {
+      if (typeof r === 'string') {                     // A1 notation, e.g. 'B1' or 'A2:A200'
+        const m = r.match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/i);
+        if (!m) throw new Error('bad range ' + r);
+        const col = t => t.toUpperCase().split('').reduce((a, ch) => a * 26 + ch.charCodeAt(0) - 64, 0);
+        const c1 = col(m[1]), r1 = +m[2], c2 = m[3] ? col(m[3]) : c1, r2 = m[4] ? +m[4] : r1;
+        return makeRange(sh, r1, c1, r2 - r1 + 1, c2 - c1 + 1);
+      }
+      return makeRange(sh, r, c, nr, nc);
+    },
+    getLastRow: () => sh._g.length,
+    getLastColumn: () => Math.max(1, ...sh._g.map(r => r.length)),
+    hideSheet: () => sh,
+    copyTo: ss => { const copy = makeSheet('Copy of ' + sh._name, sh._g.map(r => r.slice()), { cur: sh._cur, money: sh._money }); ss._sheets.push(copy); return copy; }
+  };
+  return sh;
+}
+function makeSS(name, sheets) {
+  const ss = {
+    _name: name, _sheets: sheets, _active: null,
+    getName: () => ss._name,
+    getSheets: () => ss._sheets.slice(),
+    getSheetByName: n => ss._sheets.find(s => s.getName() === n) || null,
+    insertSheet: n => { const s = makeSheet(n, [[]]); ss._sheets.push(s); return s; },
+    setActiveSheet: s => { ss._active = s; return s; },
+    moveActiveSheet: pos => { const s = ss._active; ss._sheets = ss._sheets.filter(x => x !== s); ss._sheets.splice(pos - 1, 0, s); },
+    getNumSheets: () => ss._sheets.length
+  };
+  return ss;
+}
+
+const D = (y, m, d) => new Date(y, m - 1, d);
+
+/* ---- month tabs: header row has BLANK cells above amount and date ---- */
+const monthHead = ['Expense Name', '', 'Category', 'Payment Method', '', '', 'Paid In Cash', 0];
+const sep26 = makeSheet('UAE Finances - September 2026', [monthHead,
+  ['Credit Card Payment - ADCB', 2066, 'Installements', 'ADCB', D(2026, 9, 1), '', 'Paid with Arab Bank', 0],
+  ['Rent', 3800, 'MBZ Home', 'ADCB', D(2026, 9, 1), '', 'Paid with ADCB', 9277.5],
+  ['Pizza w / Rana', 50, 'Food', 'ADCB', D(2026, 9, 2), '', 'Sum', 9277.5]
+]);
+const aug26 = makeSheet('UAE Finances - August 2026', [monthHead,
+  ['Rent', 3800, 'MBZ Home', 'ADCB', D(2026, 8, 1)]
+]);
+// the one older tab that does label its amount column
+const nov25 = makeSheet('UAE Finances -November 2025',
+  [['Expense Name', 'Amount in AED', 'Category', 'Payment Method', 'Date'],
+   ['Rent', 3500, 'Housing', 'ADCB', D(2025, 11, 1)]]);
+
+/* ---- card tabs: name header is "Payments", amount header blank ---- */
+const cardHead = ['Payments', '', 'Transaction Status', '', 'Payment Status', 'Payment Date', 'Notes', '', 'Current Credit Available', 3368];
+const touch = makeSheet('ADCB Touchpoints Credit Card', [cardHead,
+  ['Car Wash', 15, 'Debt', D(2026, 9, 10), '', '', '', '', '', ''],
+  ['Wingstop', 80, 'Debt', D(2026, 9, 10), '', '', '', '', '', ''],
+  ['Lulu', 220, 'Debt', D(2026, 9, 10), '', '', '', '', '', '']
+]);
+const islamic = makeSheet('ADCB 365 Islamic Credit Card', [cardHead,
+  ['Credit Card Loan - Payment 1', 750, 'Debt', D(2026, 6, 9), 'Paid', D(2026, 7, 6), '', '', '', ''],
+  ['Credit Card Loan - Payment 2', 750, 'Debt', D(2026, 6, 9), 'Paid', D(2026, 7, 12), '', '', '', ''],
+  ['Credit Card Loan - Payment 3', 750, 'Debt', D(2026, 6, 9), '', '', '', '', '', ''],
+  ['Credit Card Loan - Payment 4', 750, 'Debt', D(2026, 6, 9), '', '', '', '', '', '']
+]);
+// labelled "Amount in AED" column that is EMPTY; the real amounts sit in B and are EGP
+const hsbc = makeSheet('HSBC Credit Card', [['Payments', '', 'Amount in AED', '', 'Notes'],
+  ['Google One', 250, '', 28410, ''],
+  ['Youtube', 160, '', 28410, ''],
+  ['Claude AI', 1000, '', 28410, '']
+], { cur: 'EGP' });
+const tabby = makeSheet('Tabby', [['Payments', 'Amount in AED', 'Transaction Status', 'Debit Date', 'Payment Status', 'Credit Date', 'Notes', '', 'Current Credit Available', 4900]]);
+const dib = makeSheet('DIB Credit Card', [['Payments', 'Amount in AED', 'Transaction Status', 'Transaction Date', 'Payment Status', 'Payment Date', 'Notes', '', 'Current Credit Available', 5000], []]);
+
+/* ---- tabs that must stay out ---- */
+const egypt = makeSheet('Egypt Finances', [monthHead, ['Transfer Mama', 1000, 'Essentials', 'HSBC', D(2026, 8, 4)]], { cur: 'EGP' });
+const egyptOld = makeSheet('Egypt Finances - Old', [monthHead, ['Old thing', 500, 'Essentials', 'HSBC', D(2025, 8, 4)]], { cur: 'EGP' });
+const egyptCopy = makeSheet('Copy of Egypt Finances', [monthHead, ['Copy thing', 500, 'Essentials', 'HSBC', D(2025, 8, 4)]], { cur: 'EGP' });
+const calculations = makeSheet('Calculations', [['Expense Name', '', 'Category'], ['Scratch maths', 999, 'x']]);
+const wishlist = makeSheet('Wishlist', [['Item', '', 'Notes'], ['New phone', 4000, '']]);
+const draft = makeSheet('Draft', [['Expense Name', '', 'Category'], ['Draft row', 123, 'y']]);
+const financesSheet = makeSheet('Finances Sheet', [['Expense Name', '', 'Category'], ['Legacy row', 77, 'z']]);
+const brain = makeSheet('SecondBrain_Data', [['Second Brain app data']]);
+
+// The real car workbook keeps fuel and service on SEPARATE tabs. (An earlier mock
+// stacked both on one tab, which hid a bug where the service tab was never read.)
+const carFuel = makeSheet('Fuel', [
+  ['Odometer Reading', 'Date', 'Cost', 'Difference In Days Between Each'],
+  [228763, D(2026, 9, 3), 150, 6], [229330, D(2026, 9, 11), 160, 8]
+]);
+const carService = makeSheet('Services', [
+  ['Item', 'Cost', 'Date', 'Odometer Reading'],
+  ['Glass', 100, D(2026, 6, 15), '-'],
+  ['Oil And Filter', 176, D(2026, 9, 16), 229700]
+]);
+// the older single-tab layout, both tables stacked — must keep working
+const carStacked = makeSheet('Hyundai Elantra', [
+  ['Odometer Reading', 'Date', 'Cost'], [229000, D(2026, 9, 1), 120], [],
+  ['Item', 'Cost', 'Date', 'Odometer Reading'], ['Oil change', 300, D(2026, 8, 20), 228500]
+]);
+
+const expensesSS = makeSS('Expenses Sheet Starting November 2025',
+  [nov25, brain, aug26, sep26, islamic, touch, tabby, dib, hsbc, calculations, wishlist,
+   egyptOld, egypt, draft, egyptCopy, financesSheet]);
+const carSS = makeSS('Hyundai Elantra', [carFuel, carService]);
+
+const SpreadsheetApp = { openById: id => (id === 'car' ? carSS : expensesSS) };
+const Session = { getScriptTimeZone: () => 'UTC' };
+const Utilities = {
+  formatDate: (date, tz, fmt) => {
+    const p = n => String(n).padStart(2, '0');
+    if (fmt === 'HH') return p(date.getHours());
+    if (fmt === 'u') return String(date.getDay() === 0 ? 7 : date.getDay());
+    if (fmt === 'yyyy-MM') return `${date.getFullYear()}-${p(date.getMonth() + 1)}`;
+    return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}`;
+  }
+};
+// notification plumbing: nothing leaves the page, every send is recorded
+const SENT = [];
+const PROPS = {};
+const PropertiesService = { getScriptProperties: () => ({
+  getProperty: k => (k in PROPS ? PROPS[k] : null),
+  setProperty: (k, v) => { PROPS[k] = v; }
+}) };
+const MailApp = { sendEmail: o => SENT.push({ via: 'email', to: o.to, title: o.subject, body: o.body }) };
+const UrlFetchApp = { fetch: (url, opts) => {
+  const o = opts || {};
+  SENT.push({ via: /ntfy/.test(url) ? 'ntfy' : 'telegram', url,
+    title: (o.headers && o.headers.Title) || '', body: String(o.payload || '') });
+  return { getContentText: () => '{}', getResponseCode: () => 200 };
+} };
+const LockService = { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) };
+const TRIGGERS = [];
+const ScriptApp = {
+  newTrigger: fn => ({ timeBased: () => ({ everyHours: () => ({ create: () => { TRIGGERS.push(fn); return fn; } }) }) }),
+  getProjectTriggers: () => TRIGGERS.map(fn => ({ getHandlerFunction: () => fn })),
+  deleteTrigger: tr => { const i = TRIGGERS.indexOf(tr.getHandlerFunction()); if (i >= 0) TRIGGERS.splice(i, 1); }
+};
+const DriveApp = { getFileById: () => ({ getLastUpdated: () => new Date() }) };
+const ContentService = { MimeType: { JSON: 'json' }, createTextOutput: t => ({ setMimeType() { return this; } }) };
+
+const R = [];
+const ok = (n, c, x = '') => R.push((c ? 'PASS  ' : 'FAIL  ') + n + (x ? '   -> ' + x : ''));
+
+(async () => {
+  const src = await (await fetch('Code.gs?t=' + Date.now(), { cache: 'no-store' })).text();
+  const api = new Function('SpreadsheetApp', 'Session', 'Utilities', 'DriveApp', 'ContentService', 'PropertiesService', 'MailApp', 'UrlFetchApp', 'ScriptApp', 'LockService',
+    src + '\n; return { CONFIG, scanTabs, readExpenses, readCards, addExpense, updateRow, deleteRow, pullAll, invalidateTabs, expensesTab, nextTabName, readFuel, readService, addFuel, addService, carSheetFor, creditAvailable, setCardPaid, addCharge, writeBrain, readBrain, notifyPreview, notifyDue, notifyTest, notifySend, runNotifications, installNotifications, removeNotifications, notifyTriggerStatus, addExpense, mergeBrain, pushAll };')
+    (SpreadsheetApp, Session, Utilities, DriveApp, ContentService, PropertiesService, MailApp, UrlFetchApp, ScriptApp, LockService);
+  api.CONFIG.SECRET = '';
+  api.CONFIG.CAR_SHEET_ID = 'car';
+  api.CONFIG.EXPENSES_SHEET_ID = 'exp';
+  api.CONFIG.EXPENSES_TAB = '';
+  api.CONFIG.CARD_TABS = 'ADCB 365 Islamic Credit Card, ADCB Touchpoints Credit Card, Tabby, DIB Credit Card, HSBC Credit Card';
+  api.CONFIG.IGNORE_TABS = '*egypt*';
+
+  const scan = api.scanTabs();
+  const months = scan.months.map(t => t.name);
+  const cards = scan.cards.map(t => t.name);
+
+  ok('month tabs found (blank headers and all)', months.length === 3, months.join(' | '));
+  ok('months dated from their names', scan.months.map(t => t.month).sort().join(',') === '2025-11,2026-08,2026-09',
+     scan.months.map(t => t.name + '=' + t.month).join(', '));
+  ok('all five card tabs found', cards.length === 5, cards.join(' | '));
+  ok('Egypt excluded everywhere', !months.some(n => /egypt/i.test(n)) && !cards.some(n => /egypt/i.test(n)),
+     'skipped: ' + scan.skipped.join(', '));
+  ok('Calculations / Wishlist / Draft / Finances Sheet stay out',
+     !['Calculations', 'Wishlist', 'Draft', 'Finances Sheet'].some(n => months.includes(n) || cards.includes(n)));
+
+  const exp = api.readExpenses();
+  const sep = exp.filter(r => r.tab === 'UAE Finances - September 2026');
+  ok('September rows read', sep.length === 3, sep.map(r => r.name).join(', '));
+  ok('amount read from the unlabelled column', sep.find(r => r.name === 'Rent').amount === 3800,
+     String(sep.find(r => r.name === 'Rent').amount));
+  ok('date read from the unlabelled column', sep.find(r => r.name === 'Rent').date === '2026-09-01',
+     sep.find(r => r.name === 'Rent').date);
+  ok('category and payment method read', sep[1].category === 'MBZ Home' && sep[1].method === 'ADCB');
+  ok('summary block ignored', !exp.some(r => /paid with|^sum$/i.test(r.name)));
+  ok('month tabs read as AED', scan.months.every(t => t.currency === 'AED'));
+  ok('the old labelled tab still works', exp.some(r => r.tab === 'UAE Finances -November 2025' && r.amount === 3500));
+
+  const cardData = api.readCards();
+  const byName = n => cardData.find(c => c.name === n);
+  ok('Touchpoints debt is the sum of its charges', byName('ADCB Touchpoints Credit Card').debt === 315,
+     String(byName('ADCB Touchpoints Credit Card').debt));
+  ok('paid instalments excluded from the debt', byName('ADCB 365 Islamic Credit Card').debt === 1500,
+     byName('ADCB 365 Islamic Credit Card').debt + ' of 4x750, 2 marked Paid');
+  ok('paid rows still listed', byName('ADCB 365 Islamic Credit Card').charges === 4 && byName('ADCB 365 Islamic Credit Card').unpaid === 2);
+  ok('HSBC reads EGP, not the empty AED column', byName('HSBC Credit Card').currency === 'EGP' && byName('HSBC Credit Card').debt === 1410,
+     byName('HSBC Credit Card').currency + ' ' + byName('HSBC Credit Card').debt);
+  ok('empty cards still appear', byName('Tabby').debt === 0 && byName('DIB Credit Card').debt === 0);
+  ok('card charges never enter the expense history', !exp.some(r => /Credit Card$|Tabby/.test(r.tab)));
+  ok('card dates parsed', byName('ADCB Touchpoints Credit Card').lastDate === '2026-09-10', byName('ADCB Touchpoints Credit Card').lastDate);
+
+  // writing
+  api.invalidateTabs();
+  const added = api.addExpense({ name: 'Test coffee', amount: 18, category: 'Food', method: 'ADCB', date: '2026-09-15', currency: 'AED' });
+  ok('expense written to this month’s tab', added.tab === 'UAE Finances - September 2026', added.tab);
+  const written = sep26._g.find(r => r[0] === 'Test coffee');
+  ok('written into the right columns', written && written[1] === 18 && written[2] === 'Food' && written[3] === 'ADCB' && written[4] instanceof Date,
+     JSON.stringify(written && written.slice(0, 5).map(String)));
+
+  api.invalidateTabs();
+  const oct = api.addExpense({ name: 'Next month', amount: 10, date: '2026-10-02', currency: 'AED' });
+  ok('new month tab follows your naming', oct.created && oct.tab === 'UAE Finances - October 2026', oct.tab);
+
+  api.invalidateTabs();
+  const target = api.readExpenses().find(r => r.name === 'Pizza w / Rana');
+  api.updateRow({ kind: 'expense', row: target.row, tab: target.tab, values: { name: 'Pizza edited', amount: 55 } });
+  ok('edit writes to the right columns', sep26._g[target.row - 1][0] === 'Pizza edited' && sep26._g[target.row - 1][1] === 55,
+     JSON.stringify(sep26._g[target.row - 1].slice(0, 3).map(String)));
+
+  api.invalidateTabs();
+  const meta = api.pullAll().meta;
+  ok('meta lists card tabs and skipped tabs', meta.cardTabs.length === 5 && meta.skippedTabs.length > 0,
+     'skipped: ' + meta.skippedTabs.join(', '));
+
+  // ---- car: fuel and service on separate tabs (the real layout) ----
+  const fuel = api.readFuel(), svc = api.readService();
+  ok('fuel read from the Fuel tab', fuel.length === 2 && fuel[1].odometer === 229330, fuel.map(f => f.odometer).join(', '));
+  ok('service read from its own tab', svc.length === 2 && svc[1].item === 'Oil And Filter' && svc[1].cost === 176,
+     svc.map(x => x.item + ' ' + x.cost).join(', ') || '(nothing read)');
+  ok('a "-" odometer reads as 0, not NaN', svc[0] && svc[0].odometer === 0, String(svc[0] && svc[0].odometer));
+  ok('fuel tab is not mistaken for the service tab',
+     api.carSheetFor('fuel').getName() === 'Fuel' && api.carSheetFor('service').getName() === 'Services',
+     api.carSheetFor('fuel').getName() + ' / ' + api.carSheetFor('service').getName());
+  const svcBefore = carService._g.length, fuelBefore = carFuel._g.length;
+  api.addService({ item: 'Tyres', cost: 900, date: '2026-09-18', odometer: 229800 });
+  ok('a new service is written to the Services tab', carService._g.length === svcBefore + 1 && carFuel._g.length === fuelBefore,
+     'services ' + svcBefore + '->' + carService._g.length + ', fuel ' + fuelBefore + '->' + carFuel._g.length);
+  api.addFuel({ odometer: 229900, date: '2026-09-19', cost: 155 });
+  ok('a new fill-up is written to the Fuel tab',
+     carFuel._g.length === fuelBefore + 1 && carFuel._g[carFuel._g.length - 1][0] === 229900 && carService._g.length === svcBefore + 1);
+
+  // ---- car: the older stacked single-tab layout still works ----
+  carSS._sheets = [carStacked];
+  const sf = api.readFuel(), ss2 = api.readService();
+  ok('stacked layout: fuel stops at the service table', sf.length === 1 && sf[0].odometer === 229000, sf.map(f => f.odometer).join(', '));
+  ok('stacked layout: service found under fuel', ss2.length === 1 && ss2[0].item === 'Oil change', ss2.map(x => x.item).join(', '));
+  carSS._sheets = [carFuel, carService];
+
+  // ---- credit available beside each card table ----
+  ok('credit available read beside the label',
+     byName('Tabby').available === 4900 && byName('DIB Credit Card').available === 5000,
+     'Tabby ' + byName('Tabby').available + ', DIB ' + byName('DIB Credit Card').available);
+  ok('credit available read from the shared card header', byName('ADCB Touchpoints Credit Card').available === 3368,
+     String(byName('ADCB Touchpoints Credit Card').available));
+  ok('no label means no figure, not zero', byName('HSBC Credit Card').available === null,
+     String(byName('HSBC Credit Card').available));
+  ok('credit available read from below a column heading',
+     api.creditAvailable([['Payments', 'Amount', 'Credit Available', 'Notes'], ['Google One', 250, 28410, '']]) === 28410);
+
+  // ---- marking card charges paid / unpaid ----
+  const tp = () => api.readCards().find(c => c.name === 'ADCB Touchpoints Credit Card');
+  const wash = tp().rows.find(r => r.name === 'Car Wash');
+  ok('cards report whether they can be toggled', tp().statusCol === true && byName('HSBC Credit Card').statusCol === false,
+     'Touchpoints ' + tp().statusCol + ', HSBC ' + byName('HSBC Credit Card').statusCol);
+  api.setCardPaid({ card: 'ADCB Touchpoints Credit Card', row: wash.row, name: 'Car Wash', amount: 15, paid: true });
+  ok('marked paid writes "Paid" into Payment Status', touch._g[wash.row - 1][4] === 'Paid', JSON.stringify(touch._g[wash.row - 1][4]));
+  ok('marking paid stamps an empty Payment Date', touch._g[wash.row - 1][5] instanceof Date);
+  ok('the debt drops by that charge', tp().debt === 300 && tp().unpaid === 2, tp().debt + ' owed, ' + tp().unpaid + ' open');
+  const stamped = touch._g[wash.row - 1][5];
+  api.setCardPaid({ card: 'ADCB Touchpoints Credit Card', row: wash.row, name: 'Car Wash', amount: 15, paid: false });
+  ok('marked unpaid clears the status', touch._g[wash.row - 1][4] === '' && tp().debt === 315, tp().debt + ' owed');
+  ok('marking unpaid leaves the payment date alone', touch._g[wash.row - 1][5] === stamped);
+  // a row inserted in the sheet since the app last synced
+  touch._g.splice(1, 0, ['Inserted later', 5, 'Debt', D(2026, 9, 11), '', '', '', '', '', '']);
+  api.setCardPaid({ card: 'ADCB Touchpoints Credit Card', row: wash.row, name: 'Car Wash', amount: 15, paid: true });
+  ok('a stale row number still finds the right charge', touch._g[wash.row][4] === 'Paid' && touch._g[wash.row - 1][4] !== 'Paid',
+     'Car Wash now row ' + (wash.row + 1) + ': ' + JSON.stringify(touch._g[wash.row][4]) + ', the inserted row: ' + JSON.stringify(touch._g[wash.row - 1][4]));
+  let threw = '';
+  try { api.setCardPaid({ card: 'HSBC Credit Card', row: 2, name: 'Google One', amount: 250, paid: true }); } catch (e) { threw = e.message; }
+  ok('a tab with no status column refuses clearly', /no Payment Status column/.test(threw), threw);
+  threw = '';
+  try { api.setCardPaid({ card: 'ADCB Touchpoints Credit Card', row: 3, name: 'Not a real charge', amount: 1, paid: true }); } catch (e) { threw = e.message; }
+  ok('an unknown charge is never guessed at', /Could not find/.test(threw), threw);
+
+  // ---- adding a charge to a card ----
+  const beforeRows = tp().rows.length, beforeDebt = tp().debt;
+  const charge = api.addCharge({ card: 'ADCB Touchpoints Credit Card', name: 'Headphones',
+    amount: 320, category: 'Shopping', date: '2026-09-20' });
+  const landed = tp().rows.find(r => r.name === 'Headphones');
+  ok('a charge lands on the card it names', !!landed && landed.card === 'ADCB Touchpoints Credit Card',
+     charge && charge.card);
+  ok('a new charge starts unpaid', landed && landed.paid === false && touch._g[charge.row - 1][4] === '',
+     landed && JSON.stringify(touch._g[charge.row - 1][4]));
+  ok('its amount and date are written', landed.amount === 320 && landed.date === '2026-09-20',
+     JSON.stringify([landed.amount, landed.date]));
+  // these card tabs have "Transaction Status" where a category would go, so there
+  // is nowhere to put one — the app says so rather than dropping it silently
+  ok('a card tab with no Category column reports that', tp().categoryCol === false, String(tp().categoryCol));
+  ok('and nothing is written into the wrong column', touch._g[charge.row - 1][2] === '',
+     JSON.stringify(touch._g[charge.row - 1][2]));
+  ok('it adds to what the card owes', tp().debt === beforeDebt + 320 && tp().rows.length === beforeRows + 1,
+     tp().debt + ' owed, was ' + beforeDebt);
+  ok('and it does not become an expense', !api.readExpenses().some(r => r.name === 'Headphones'));
+  api.setCardPaid({ card: 'ADCB Touchpoints Credit Card', row: charge.row, name: 'Headphones', amount: 320, paid: true });
+  ok('paying it clears it from the debt', tp().debt === beforeDebt, tp().debt + ' owed');
+  threw = '';
+  try { api.addCharge({ card: 'Nothing Like This', name: 'x', amount: 1 }); } catch (e) { threw = e.message; }
+  ok('an unknown card is refused by name', /No card called/.test(threw), threw);
+
+  // ---- notifications: rules only fire when they are actually true ----
+  const iso = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const TODAY = iso(new Date());
+  const daysAgo = n => iso(new Date(Date.now() - n * 86400000));
+  const allOn = Object.fromEntries(['expenses','journal','tasks','projects','courses','habits','study','exercise','budgets','cards','car','digest']
+    .map(k => [k, { on: true, time: '09:00' }]));
+  const brainWith = extra => Object.assign({
+    settings: { notify: { on: true, channel: 'ntfy', to: 'my-topic', cats: allOn }, studyWeekly: 10, exerciseWeekly: 4 },
+    tasks: [], projects: [], journal: [], courses: [], habits: [], habitLogs: [], study: [], workouts: [], budgets: []
+  }, extra);
+  const say = (extra, key) => {
+    api.writeBrain(brainWith(extra));
+    const p = api.notifyPreview();
+    const hit = p.messages.find(m => m.category === key);
+    return hit ? hit.body : '';
+  };
+
+  ok('journal reminder fires when today is empty', /No entry yet today/.test(say({ journal: [{ date: daysAgo(1) }] }, 'journal')));
+  ok('journal reminder counts the streak', /3-day streak/.test(say({ journal: [1,2,3].map(n => ({ date: daysAgo(n) })) }, 'journal')),
+     say({ journal: [1,2,3].map(n => ({ date: daysAgo(n) })) }, 'journal'));
+  ok('journal stays quiet once written', say({ journal: [{ date: TODAY }] }, 'journal') === '');
+  ok('tasks name what is overdue and due',
+     /1 task overdue/.test(say({ tasks: [{ title: 'Pay bill', due: daysAgo(2), status: 'To Do' }, { title: 'Call garage', due: TODAY, status: 'To Do' }] }, 'tasks')));
+  ok('tasks stay quiet when nothing is due', say({ tasks: [{ title: 'Later', due: daysAgo(-9), status: 'To Do' }] }, 'tasks') === '');
+  ok('projects flag a deadline inside a week',
+     /Due within a week[\s\S]*Website/.test(say({ projects: [{ name: 'Website', status: 'Active', deadline: daysAgo(-3), updated: TODAY }] }, 'projects')));
+  ok('projects flag one left untouched',
+     /Not updated[\s\S]*Old thing/.test(say({ projects: [{ name: 'Old thing', status: 'Active', updated: daysAgo(30), progress: 20 }] }, 'projects')));
+  ok('completed projects are left alone', say({ projects: [{ name: 'Done', status: 'Completed', updated: daysAgo(40) }] }, 'projects') === '');
+  ok('courses flag a week with no lessons',
+     /Spanish/.test(say({ courses: [{ name: 'Spanish', status: 'In Progress', updated: daysAgo(10), lessonsDone: 3, lessonsTotal: 20 }] }, 'courses')));
+  ok('habits list only what is still open',
+     /1 habit still open[\s\S]*Read/.test(say({ habits: [{ id: 'h1', name: 'Read' }, { id: 'h2', name: 'Water' }], habitLogs: [{ habitId: 'h2', date: TODAY }] }, 'habits')));
+  ok('study compares against the weekly target',
+     /of your 10h target/.test(say({ study: [{ date: daysAgo(1), hours: 2 }] }, 'study')));
+  ok('exercise counts this week', /1 of 4 workouts/.test(say({ workouts: [{ date: daysAgo(2) }] }, 'exercise')));
+  // this month, whenever "this month" happens to be — the fixtures are dated
+  // last year and a budget only ever looks at the current month
+  api.invalidateTabs();
+  const budgetRow = api.addExpense({ name: 'Budget probe', amount: 250, category: 'Food', date: TODAY, currency: 'AED' });
+  api.invalidateTabs();
+  ok('budgets warn only past 90%',
+     say({ budgets: [{ category: 'Food', limit: 100000 }] }, 'budgets') === '' &&
+     /Food/.test(say({ budgets: [{ category: 'Food', limit: 1 }] }, 'budgets')));
+  api.deleteRow({ kind: 'expense', row: budgetRow.row, tab: budgetRow.tab });
+  api.invalidateTabs();
+  ok('cards report what is owed', /Touchpoints/.test(say({}, 'cards')));
+  ok('the digest always has something to say', say({}, 'digest').length > 10);
+
+  // expense reminder reacts to a row added today — starting from a day with
+  // nothing on it, whatever earlier tests left behind
+  api.invalidateTabs();
+  api.readExpenses().filter(r => r.date === TODAY)
+     .forEach(r => api.deleteRow({ kind: 'expense', row: r.row, tab: r.tab }));
+  api.invalidateTabs();
+  ok('expense reminder fires when nothing is logged today', /Nothing logged today/.test(say({}, 'expenses')));
+  api.addExpense({ name: 'Notify test coffee', amount: 9, date: TODAY, currency: 'AED' });
+  api.invalidateTabs();
+  ok('expense reminder goes quiet once something is logged', say({}, 'expenses') === '');
+
+  // ---- scheduling: the right hour, the right day, and only once a day ----
+  api.writeBrain(brainWith({ journal: [{ date: daysAgo(1) }] }));
+  SENT.length = 0;
+  const preview = api.notifyPreview();
+  ok('preview sends nothing', SENT.length === 0 && preview.messages.length > 0, preview.messages.length + ' messages previewed');
+  const hourNow = String(new Date().getHours()).padStart(2, '0');
+  const otherHour = String((new Date().getHours() + 3) % 24).padStart(2, '0');
+  api.writeBrain(brainWith({ journal: [{ date: daysAgo(1) }], settings: { notify: { on: true, channel: 'ntfy', to: 't', cats: { journal: { on: true, time: otherHour + ':00' } } }, studyWeekly: 10, exerciseWeekly: 4 } }));
+  ok('nothing fires outside its hour', api.notifyDue(false).due.length === 0);
+  api.writeBrain(brainWith({ journal: [{ date: daysAgo(1) }], settings: { notify: { on: true, channel: 'ntfy', to: 't', cats: { journal: { on: true, time: hourNow + ':00' } } }, studyWeekly: 10, exerciseWeekly: 4 } }));
+  ok('it fires in its own hour', api.notifyDue(false).due.map(d => d.key).join() === 'journal');
+  SENT.length = 0;
+  const run1 = api.runNotifications();
+  ok('sending reaches the chosen channel', SENT.length === 1 && SENT[0].via === 'ntfy' && /No entry yet today/.test(SENT[0].body),
+     JSON.stringify(SENT[0] && { via: SENT[0].via, title: SENT[0].title }));
+  const run2 = api.runNotifications();
+  ok('the same reminder is not repeated the same day', run2.sent.length === 0, 'first run sent ' + run1.sent.join());
+  api.writeBrain(brainWith({ journal: [{ date: daysAgo(1) }], settings: { notify: { on: false, channel: 'ntfy', to: 't', cats: { journal: { on: true, time: hourNow + ':00' } } } } }));
+  SENT.length = 0;
+  api.runNotifications();
+  ok('the master switch silences everything', SENT.length === 0);
+
+  // ---- channels ----
+  SENT.length = 0;
+  api.notifySend('T', 'B', { channel: 'email', to: 'me@example.com' });
+  api.notifySend('T', 'B', { channel: 'ntfy', to: 'https://ntfy.sh/my-topic' });
+  api.notifySend('T', 'B', { channel: 'telegram', to: '123:ABC|456' });
+  ok('all three channels deliver', SENT.map(x => x.via).join() === 'email,ntfy,telegram', SENT.map(x => x.via).join());
+  ok('an ntfy URL is accepted as well as a bare topic', /ntfy\.sh\/my-topic/.test(SENT[1].url), SENT[1].url);
+  let notifyThrew = '';
+  try { api.notifySend('T', 'B', { channel: 'telegram', to: 'just-a-token' }); } catch (e) { notifyThrew = e.message; }
+  ok('a half-filled Telegram setting is refused', /botToken\|chatId/.test(notifyThrew), notifyThrew);
+
+  // ---- the schedule itself ----
+  ok('installing creates one hourly trigger', api.installNotifications().installed === true && TRIGGERS.length === 1, TRIGGERS.length + ' trigger(s)');
+  api.installNotifications();
+  ok('installing twice does not stack up', TRIGGERS.length === 1, TRIGGERS.length + ' trigger(s)');
+  ok('removing takes it away', api.removeNotifications().installed === false && TRIGGERS.length === 0);
+
+  // ---- app data: a push must not wipe what another device wrote ----
+  const older = Date.now() - 600000, newer = Date.now() - 1000;   // real timestamps: tombstones older than 120 days are pruned
+  const laptop = { settings: { name: 'Y', ts: older }, journal: [{ id: 'j1', title: 'laptop entry', ts: newer }], courses: [{ id: 'c1', lessonsDone: 5, ts: older }], notes: [], trash: [] };
+  const phone  = { settings: { name: 'Y', ts: older }, journal: [], courses: [{ id: 'c1', lessonsDone: 9, ts: newer }], notes: [{ id: 'n1', title: 'phone note', ts: newer }], trash: [] };
+  const both = api.mergeBrain(laptop, phone);
+  ok('a push keeps the other device’s journal entry', both.journal.length === 1 && both.journal[0].title === 'laptop entry');
+  ok('a push keeps the other device’s note', both.notes.length === 1 && both.notes[0].title === 'phone note');
+  ok('the newer edit of the same course wins', both.courses[0].lessonsDone === 9, String(both.courses[0].lessonsDone));
+  ok('merging is order-independent',
+     JSON.stringify(api.mergeBrain(phone, laptop).courses) === JSON.stringify(both.courses));
+  const deleted = api.mergeBrain({ journal: [], trash: [{ id: 'j1', ts: newer + 1 }] }, laptop);
+  ok('a deletion is not undone by the other copy', deleted.journal.length === 0 && deleted.trash.length === 1);
+  const reAdded = api.mergeBrain({ journal: [], trash: [{ id: 'j1', ts: older }] }, laptop);
+  ok('an edit after the deletion brings it back', reAdded.journal.length === 1);
+  ok('the newer settings win', api.mergeBrain({ settings: { name: 'old', ts: older } }, { settings: { name: 'new', ts: newer } }).settings.name === 'new');
+  ok('a first sync from an empty side keeps everything', api.mergeBrain(null, laptop).journal.length === 1 && api.mergeBrain(laptop, null).journal.length === 1);
+  ok('lists the script does not know about are carried over',
+     JSON.stringify(api.mergeBrain({ future: [1] }, { future: [1, 2] }).future) === '[1,2]');
+  // end to end through pushAll, which is what a device actually calls
+  api.writeBrain(phone);
+  api.pushAll({ brain: laptop });
+  const stored = api.readBrain();
+  ok('pushing through the API merges instead of overwriting',
+     stored.journal.length === 1 && stored.notes.length === 1 && stored.courses[0].lessonsDone === 9,
+     'journal ' + stored.journal.length + ', notes ' + stored.notes.length + ', lessons ' + stored.courses[0].lessonsDone);
+
+  const failed = R.filter(r => r.startsWith('FAIL')).length;
+  document.getElementById('out').textContent = R.join('\n') + `\n\n${R.length - failed} passed, ${failed} failed`;
+})().catch(e => { document.getElementById('out').textContent = 'ERROR: ' + (e && e.stack || e); });
+</script>
